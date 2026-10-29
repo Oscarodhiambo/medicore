@@ -1,0 +1,837 @@
+-- ============================================================
+-- MediCore Hospital Management System
+-- PostgreSQL Schema
+-- Generated: 2026-06-15
+-- ============================================================
+
+-- Extensions
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+
+-- ============================================================
+-- ENUMS
+-- ============================================================
+
+CREATE TYPE gender_type AS ENUM ('Male', 'Female', 'Other');
+CREATE TYPE patient_status AS ENUM ('Admitted', 'Critical', 'Stable', 'Observation', 'Recovering', 'Discharged', 'Deceased');
+CREATE TYPE appointment_status AS ENUM ('Confirmed', 'Pending', 'Cancelled', 'Completed', 'No-show');
+CREATE TYPE bed_status AS ENUM ('Available', 'Occupied', 'Maintenance', 'Reserved');
+CREATE TYPE bed_type AS ENUM ('Standard', 'Critical Care', 'Post-op', 'Maternity', 'Pediatric', 'Private', 'Isolation');
+CREATE TYPE staff_role AS ENUM ('Doctor', 'Nurse', 'Surgeon', 'Lab Tech', 'Pharmacist', 'Radiologist', 'Admin', 'Support');
+CREATE TYPE staff_status AS ENUM ('On Duty', 'On Call', 'Off Duty', 'On Leave', 'Terminated');
+CREATE TYPE lab_status AS ENUM ('Pending', 'In Progress', 'Normal', 'Abnormal', 'Cancelled');
+CREATE TYPE lab_priority AS ENUM ('Routine', 'Urgent', 'STAT');
+CREATE TYPE invoice_status AS ENUM ('Paid', 'Unpaid', 'Partial', 'Overdue', 'Cancelled', 'Refunded');
+CREATE TYPE payment_method AS ENUM ('Cash', 'M-Pesa', 'Card', 'Insurance', 'Bank Transfer');
+
+-- ============================================================
+-- DEPARTMENTS
+-- ============================================================
+
+CREATE TABLE departments (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    name VARCHAR(100) NOT NULL UNIQUE,
+    code VARCHAR(10) NOT NULL UNIQUE,
+    floor INTEGER,
+    head_of_dept UUID,  -- FK to staff, added after staff table
+    phone VARCHAR(20),
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ============================================================
+-- WARDS
+-- ============================================================
+
+CREATE TABLE wards (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    name VARCHAR(100) NOT NULL UNIQUE,
+    code VARCHAR(20) NOT NULL UNIQUE,
+    department_id UUID REFERENCES departments(id),
+    floor INTEGER NOT NULL,
+    total_beds INTEGER DEFAULT 0,
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ============================================================
+-- BEDS
+-- ============================================================
+
+CREATE TABLE beds (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    bed_number VARCHAR(20) NOT NULL UNIQUE,
+    ward_id UUID NOT NULL REFERENCES wards(id),
+    bed_type bed_type NOT NULL DEFAULT 'Standard',
+    status bed_status NOT NULL DEFAULT 'Available',
+    daily_rate NUMERIC(10, 2) DEFAULT 0,
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_beds_ward ON beds(ward_id);
+CREATE INDEX idx_beds_status ON beds(status);
+
+-- ============================================================
+-- STAFF
+-- ============================================================
+
+CREATE TABLE staff (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    staff_number VARCHAR(20) NOT NULL UNIQUE,
+    first_name VARCHAR(100) NOT NULL,
+    last_name VARCHAR(100) NOT NULL,
+    role staff_role NOT NULL,
+    department_id UUID REFERENCES departments(id),
+    specialization VARCHAR(200),
+    license_number VARCHAR(50),
+    phone VARCHAR(20),
+    email VARCHAR(150) UNIQUE,
+    national_id VARCHAR(20),
+    date_of_birth DATE,
+    hire_date DATE NOT NULL DEFAULT CURRENT_DATE,
+    status staff_status NOT NULL DEFAULT 'Off Duty',
+    salary NUMERIC(12, 2),
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_staff_department ON staff(department_id);
+CREATE INDEX idx_staff_role ON staff(role);
+CREATE INDEX idx_staff_status ON staff(status);
+
+-- Add FK for department head
+ALTER TABLE departments ADD CONSTRAINT fk_dept_head FOREIGN KEY (head_of_dept) REFERENCES staff(id);
+
+-- ============================================================
+-- PATIENTS
+-- ============================================================
+
+CREATE TABLE patients (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    patient_number VARCHAR(30) NOT NULL UNIQUE,
+    first_name VARCHAR(100) NOT NULL,
+    last_name VARCHAR(100) NOT NULL,
+    date_of_birth DATE NOT NULL,
+    gender gender_type NOT NULL,
+    national_id VARCHAR(20),
+    phone VARCHAR(20),
+    email VARCHAR(150),
+    address TEXT,
+    emergency_contact_name VARCHAR(200),
+    emergency_contact_phone VARCHAR(20),
+    blood_type VARCHAR(5),
+    allergies TEXT,
+    chronic_conditions TEXT,
+    insurance_provider VARCHAR(100),
+    insurance_number VARCHAR(50),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_patients_name ON patients(last_name, first_name);
+CREATE INDEX idx_patients_national_id ON patients(national_id);
+CREATE INDEX idx_patients_phone ON patients(phone);
+
+-- ============================================================
+-- ADMISSIONS
+-- ============================================================
+
+CREATE TABLE admissions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    admission_number VARCHAR(30) NOT NULL UNIQUE,
+    patient_id UUID NOT NULL REFERENCES patients(id),
+    department_id UUID NOT NULL REFERENCES departments(id),
+    ward_id UUID REFERENCES wards(id),
+    bed_id UUID REFERENCES beds(id),
+    attending_doctor_id UUID NOT NULL REFERENCES staff(id),
+    status patient_status NOT NULL DEFAULT 'Admitted',
+    admission_date TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    discharge_date TIMESTAMPTZ,
+    diagnosis TEXT,
+    admission_notes TEXT,
+    discharge_notes TEXT,
+    is_emergency BOOLEAN DEFAULT false,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_admissions_patient ON admissions(patient_id);
+CREATE INDEX idx_admissions_status ON admissions(status);
+CREATE INDEX idx_admissions_doctor ON admissions(attending_doctor_id);
+CREATE INDEX idx_admissions_date ON admissions(admission_date DESC);
+CREATE INDEX idx_admissions_active ON admissions(status) WHERE status NOT IN ('Discharged', 'Deceased');
+
+-- ============================================================
+-- APPOINTMENTS
+-- ============================================================
+
+CREATE TABLE appointments (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    appointment_number VARCHAR(20) NOT NULL UNIQUE,
+    patient_id UUID NOT NULL REFERENCES patients(id),
+    doctor_id UUID NOT NULL REFERENCES staff(id),
+    department_id UUID NOT NULL REFERENCES departments(id),
+    appointment_date DATE NOT NULL,
+    appointment_time TIME NOT NULL,
+    duration_minutes INTEGER DEFAULT 30,
+    type VARCHAR(100) NOT NULL,
+    status appointment_status NOT NULL DEFAULT 'Pending',
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_appointments_patient ON appointments(patient_id);
+CREATE INDEX idx_appointments_doctor ON appointments(doctor_id);
+CREATE INDEX idx_appointments_date ON appointments(appointment_date, appointment_time);
+CREATE INDEX idx_appointments_status ON appointments(status);
+
+-- ============================================================
+-- VITALS
+-- ============================================================
+
+CREATE TABLE vitals (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    admission_id UUID NOT NULL REFERENCES admissions(id),
+    recorded_by UUID NOT NULL REFERENCES staff(id),
+    temperature NUMERIC(4, 1),         -- Celsius
+    blood_pressure_sys INTEGER,         -- mmHg
+    blood_pressure_dia INTEGER,         -- mmHg
+    heart_rate INTEGER,                 -- bpm
+    respiratory_rate INTEGER,           -- breaths/min
+    oxygen_saturation NUMERIC(4, 1),   -- %
+    weight NUMERIC(5, 1),              -- kg
+    height NUMERIC(5, 1),              -- cm
+    blood_glucose NUMERIC(5, 1),       -- mg/dL
+    pain_level INTEGER CHECK (pain_level BETWEEN 0 AND 10),
+    notes TEXT,
+    recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX idx_vitals_admission ON vitals(admission_id);
+CREATE INDEX idx_vitals_recorded_at ON vitals(recorded_at DESC);
+
+-- ============================================================
+-- LAB TESTS
+-- ============================================================
+
+CREATE TABLE lab_test_types (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    name VARCHAR(100) NOT NULL UNIQUE,
+    category VARCHAR(50) NOT NULL,
+    description TEXT,
+    normal_range VARCHAR(100),
+    unit VARCHAR(30),
+    base_price NUMERIC(10, 2) DEFAULT 0,
+    turnaround_hours INTEGER DEFAULT 24,
+    is_active BOOLEAN DEFAULT true
+);
+
+CREATE TABLE lab_orders (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    order_number VARCHAR(20) NOT NULL UNIQUE,
+    patient_id UUID NOT NULL REFERENCES patients(id),
+    admission_id UUID REFERENCES admissions(id),
+    test_type_id UUID NOT NULL REFERENCES lab_test_types(id),
+    ordered_by UUID NOT NULL REFERENCES staff(id),
+    performed_by UUID REFERENCES staff(id),
+    priority lab_priority NOT NULL DEFAULT 'Routine',
+    status lab_status NOT NULL DEFAULT 'Pending',
+    result TEXT,
+    result_value NUMERIC(10, 3),
+    result_unit VARCHAR(30),
+    is_abnormal BOOLEAN DEFAULT false,
+    clinical_notes TEXT,
+    ordered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_lab_orders_patient ON lab_orders(patient_id);
+CREATE INDEX idx_lab_orders_status ON lab_orders(status);
+CREATE INDEX idx_lab_orders_ordered_at ON lab_orders(ordered_at DESC);
+CREATE INDEX idx_lab_orders_doctor ON lab_orders(ordered_by);
+
+-- ============================================================
+-- PRESCRIPTIONS
+-- ============================================================
+
+CREATE TABLE prescriptions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    prescription_number VARCHAR(20) NOT NULL UNIQUE,
+    patient_id UUID NOT NULL REFERENCES patients(id),
+    admission_id UUID REFERENCES admissions(id),
+    prescribed_by UUID NOT NULL REFERENCES staff(id),
+    dispensed_by UUID REFERENCES staff(id),
+    is_dispensed BOOLEAN DEFAULT false,
+    dispensed_at TIMESTAMPTZ,
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE prescription_items (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    prescription_id UUID NOT NULL REFERENCES prescriptions(id) ON DELETE CASCADE,
+    medicine_id UUID NOT NULL,  -- FK added after medicines table
+    dosage VARCHAR(100) NOT NULL,
+    frequency VARCHAR(100) NOT NULL,
+    duration VARCHAR(50) NOT NULL,
+    quantity INTEGER NOT NULL,
+    instructions TEXT
+);
+
+-- ============================================================
+-- PHARMACY / MEDICINES
+-- ============================================================
+
+CREATE TABLE medicine_categories (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    name VARCHAR(100) NOT NULL UNIQUE,
+    description TEXT
+);
+
+CREATE TABLE suppliers (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    name VARCHAR(200) NOT NULL,
+    contact_person VARCHAR(100),
+    phone VARCHAR(20),
+    email VARCHAR(150),
+    address TEXT,
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE medicines (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    code VARCHAR(20) NOT NULL UNIQUE,
+    name VARCHAR(200) NOT NULL,
+    generic_name VARCHAR(200),
+    category_id UUID REFERENCES medicine_categories(id),
+    supplier_id UUID REFERENCES suppliers(id),
+    unit_price NUMERIC(10, 2) NOT NULL DEFAULT 0,
+    cost_price NUMERIC(10, 2) DEFAULT 0,
+    stock_quantity INTEGER NOT NULL DEFAULT 0,
+    reorder_level INTEGER DEFAULT 50,
+    unit VARCHAR(30) DEFAULT 'tablets',
+    dosage_form VARCHAR(50),
+    strength VARCHAR(50),
+    expiry_date DATE,
+    batch_number VARCHAR(50),
+    is_controlled BOOLEAN DEFAULT false,
+    requires_prescription BOOLEAN DEFAULT true,
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_medicines_category ON medicines(category_id);
+CREATE INDEX idx_medicines_stock ON medicines(stock_quantity) WHERE stock_quantity <= 50;
+CREATE INDEX idx_medicines_expiry ON medicines(expiry_date) WHERE expiry_date <= (CURRENT_DATE + INTERVAL '90 days');
+
+-- Add FK to prescription_items
+ALTER TABLE prescription_items ADD CONSTRAINT fk_prescription_medicine FOREIGN KEY (medicine_id) REFERENCES medicines(id);
+
+-- Stock movements for audit trail
+CREATE TABLE stock_movements (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    medicine_id UUID NOT NULL REFERENCES medicines(id),
+    movement_type VARCHAR(20) NOT NULL CHECK (movement_type IN ('IN', 'OUT', 'ADJUSTMENT', 'EXPIRED', 'RETURN')),
+    quantity INTEGER NOT NULL,
+    reference_number VARCHAR(50),
+    reason TEXT,
+    performed_by UUID REFERENCES staff(id),
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ============================================================
+-- BILLING & INVOICES
+-- ============================================================
+
+CREATE TABLE invoices (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    invoice_number VARCHAR(30) NOT NULL UNIQUE,
+    patient_id UUID NOT NULL REFERENCES patients(id),
+    admission_id UUID REFERENCES admissions(id),
+    total_amount NUMERIC(12, 2) NOT NULL DEFAULT 0,
+    paid_amount NUMERIC(12, 2) NOT NULL DEFAULT 0,
+    balance NUMERIC(12, 2) GENERATED ALWAYS AS (total_amount - paid_amount) STORED,
+    status invoice_status NOT NULL DEFAULT 'Unpaid',
+    invoice_date DATE NOT NULL DEFAULT CURRENT_DATE,
+    due_date DATE NOT NULL,
+    notes TEXT,
+    created_by UUID REFERENCES staff(id),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_invoices_patient ON invoices(patient_id);
+CREATE INDEX idx_invoices_status ON invoices(status);
+CREATE INDEX idx_invoices_due ON invoices(due_date) WHERE status IN ('Unpaid', 'Partial');
+
+CREATE TABLE invoice_items (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    invoice_id UUID NOT NULL REFERENCES invoices(id) ON DELETE CASCADE,
+    description VARCHAR(300) NOT NULL,
+    category VARCHAR(50) NOT NULL,  -- 'Consultation', 'Ward', 'Lab', 'Pharmacy', 'Surgery', 'Other'
+    quantity INTEGER NOT NULL DEFAULT 1,
+    unit_price NUMERIC(10, 2) NOT NULL,
+    total_price NUMERIC(12, 2) GENERATED ALWAYS AS (quantity * unit_price) STORED
+);
+
+CREATE TABLE payments (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    payment_number VARCHAR(30) NOT NULL UNIQUE,
+    invoice_id UUID NOT NULL REFERENCES invoices(id),
+    amount NUMERIC(12, 2) NOT NULL,
+    method payment_method NOT NULL,
+    reference_number VARCHAR(100),
+    received_by UUID REFERENCES staff(id),
+    payment_date TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_payments_invoice ON payments(invoice_id);
+
+-- ============================================================
+-- INSURANCE
+-- ============================================================
+
+CREATE TABLE insurance_providers (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    name VARCHAR(200) NOT NULL UNIQUE,
+    code VARCHAR(20) UNIQUE,
+    contact_phone VARCHAR(20),
+    contact_email VARCHAR(150),
+    address TEXT,
+    coverage_percentage NUMERIC(5, 2) DEFAULT 80.00,
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE insurance_claims (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    claim_number VARCHAR(30) NOT NULL UNIQUE,
+    invoice_id UUID NOT NULL REFERENCES invoices(id),
+    provider_id UUID NOT NULL REFERENCES insurance_providers(id),
+    patient_id UUID NOT NULL REFERENCES patients(id),
+    claim_amount NUMERIC(12, 2) NOT NULL,
+    approved_amount NUMERIC(12, 2),
+    status VARCHAR(20) NOT NULL DEFAULT 'Submitted' CHECK (status IN ('Submitted', 'Under Review', 'Approved', 'Rejected', 'Paid')),
+    submitted_at TIMESTAMPTZ DEFAULT NOW(),
+    resolved_at TIMESTAMPTZ,
+    notes TEXT
+);
+
+-- ============================================================
+-- STAFF SCHEDULING
+-- ============================================================
+
+CREATE TABLE shifts (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    name VARCHAR(50) NOT NULL,
+    start_time TIME NOT NULL,
+    end_time TIME NOT NULL,
+    is_active BOOLEAN DEFAULT true
+);
+
+CREATE TABLE staff_schedules (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    staff_id UUID NOT NULL REFERENCES staff(id),
+    shift_id UUID NOT NULL REFERENCES shifts(id),
+    schedule_date DATE NOT NULL,
+    ward_id UUID REFERENCES wards(id),
+    is_on_call BOOLEAN DEFAULT false,
+    notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(staff_id, schedule_date, shift_id)
+);
+
+CREATE INDEX idx_schedules_staff ON staff_schedules(staff_id, schedule_date);
+CREATE INDEX idx_schedules_date ON staff_schedules(schedule_date);
+
+-- ============================================================
+-- AUDIT LOG
+-- ============================================================
+
+CREATE TABLE audit_log (
+    id BIGSERIAL PRIMARY KEY,
+    table_name VARCHAR(50) NOT NULL,
+    record_id UUID NOT NULL,
+    action VARCHAR(10) NOT NULL CHECK (action IN ('INSERT', 'UPDATE', 'DELETE')),
+    old_data JSONB,
+    new_data JSONB,
+    performed_by UUID REFERENCES staff(id),
+    performed_at TIMESTAMPTZ DEFAULT NOW(),
+    ip_address INET
+);
+
+CREATE INDEX idx_audit_table ON audit_log(table_name, record_id);
+CREATE INDEX idx_audit_date ON audit_log(performed_at DESC);
+
+-- ============================================================
+-- NOTIFICATIONS / ALERTS
+-- ============================================================
+
+CREATE TABLE notifications (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    recipient_id UUID NOT NULL REFERENCES staff(id),
+    title VARCHAR(200) NOT NULL,
+    message TEXT NOT NULL,
+    type VARCHAR(30) NOT NULL DEFAULT 'info' CHECK (type IN ('info', 'warning', 'critical', 'success')),
+    is_read BOOLEAN DEFAULT false,
+    reference_table VARCHAR(50),
+    reference_id UUID,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_notifications_recipient ON notifications(recipient_id, is_read);
+
+-- ============================================================
+-- USERS & AUTH
+-- ============================================================
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    staff_id UUID UNIQUE REFERENCES staff(id),
+    username VARCHAR(50) NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    role VARCHAR(30) NOT NULL DEFAULT 'staff' CHECK (role IN ('admin', 'doctor', 'nurse', 'lab_tech', 'pharmacist', 'billing', 'reception', 'staff')),
+    is_active BOOLEAN DEFAULT true,
+    last_login TIMESTAMPTZ,
+    failed_attempts INTEGER DEFAULT 0,
+    locked_until TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE sessions (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token TEXT NOT NULL UNIQUE,
+    ip_address INET,
+    user_agent TEXT,
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- ============================================================
+-- VIEWS (for common queries)
+-- ============================================================
+
+-- Active admissions with full details
+CREATE VIEW v_active_admissions AS
+SELECT
+    a.id,
+    a.admission_number,
+    p.patient_number,
+    p.first_name || ' ' || p.last_name AS patient_name,
+    p.date_of_birth,
+    p.gender,
+    d.name AS department,
+    w.name AS ward,
+    b.bed_number,
+    s.first_name || ' ' || s.last_name AS doctor_name,
+    a.status,
+    a.admission_date,
+    a.diagnosis,
+    a.is_emergency
+FROM admissions a
+JOIN patients p ON p.id = a.patient_id
+JOIN departments d ON d.id = a.department_id
+LEFT JOIN wards w ON w.id = a.ward_id
+LEFT JOIN beds b ON b.id = a.bed_id
+JOIN staff s ON s.id = a.attending_doctor_id
+WHERE a.status NOT IN ('Discharged', 'Deceased');
+
+-- Bed occupancy overview
+CREATE VIEW v_bed_occupancy AS
+SELECT
+    w.name AS ward,
+    w.floor,
+    COUNT(*) AS total_beds,
+    COUNT(*) FILTER (WHERE b.status = 'Occupied') AS occupied,
+    COUNT(*) FILTER (WHERE b.status = 'Available') AS available,
+    COUNT(*) FILTER (WHERE b.status = 'Maintenance') AS maintenance,
+    ROUND(COUNT(*) FILTER (WHERE b.status = 'Occupied')::NUMERIC / COUNT(*)::NUMERIC * 100, 1) AS occupancy_pct
+FROM beds b
+JOIN wards w ON w.id = b.ward_id
+GROUP BY w.name, w.floor
+ORDER BY occupancy_pct DESC;
+
+-- Today's appointments
+CREATE VIEW v_today_appointments AS
+SELECT
+    ap.appointment_number,
+    p.first_name || ' ' || p.last_name AS patient_name,
+    s.first_name || ' ' || s.last_name AS doctor_name,
+    d.name AS department,
+    ap.appointment_time,
+    ap.type,
+    ap.status
+FROM appointments ap
+JOIN patients p ON p.id = ap.patient_id
+JOIN staff s ON s.id = ap.doctor_id
+JOIN departments d ON d.id = ap.department_id
+WHERE ap.appointment_date = CURRENT_DATE
+ORDER BY ap.appointment_time;
+
+-- Outstanding invoices
+CREATE VIEW v_outstanding_invoices AS
+SELECT
+    i.invoice_number,
+    p.first_name || ' ' || p.last_name AS patient_name,
+    i.total_amount,
+    i.paid_amount,
+    i.balance,
+    i.status,
+    i.due_date,
+    CASE WHEN i.due_date < CURRENT_DATE THEN true ELSE false END AS is_overdue
+FROM invoices i
+JOIN patients p ON p.id = i.patient_id
+WHERE i.status IN ('Unpaid', 'Partial')
+ORDER BY i.due_date;
+
+-- Low stock medicines
+CREATE VIEW v_low_stock_medicines AS
+SELECT
+    m.code,
+    m.name,
+    mc.name AS category,
+    m.stock_quantity,
+    m.reorder_level,
+    m.unit_price,
+    s.name AS supplier,
+    m.expiry_date
+FROM medicines m
+LEFT JOIN medicine_categories mc ON mc.id = m.category_id
+LEFT JOIN suppliers s ON s.id = m.supplier_id
+WHERE m.stock_quantity <= m.reorder_level AND m.is_active = true
+ORDER BY m.stock_quantity;
+
+-- Staff on duty today
+CREATE VIEW v_staff_on_duty AS
+SELECT
+    s.staff_number,
+    s.first_name || ' ' || s.last_name AS name,
+    s.role,
+    d.name AS department,
+    s.specialization,
+    sh.name AS shift,
+    ss.is_on_call,
+    w.name AS assigned_ward
+FROM staff_schedules ss
+JOIN staff s ON s.id = ss.staff_id
+JOIN shifts sh ON sh.id = ss.shift_id
+JOIN departments d ON d.id = s.department_id
+LEFT JOIN wards w ON w.id = ss.ward_id
+WHERE ss.schedule_date = CURRENT_DATE AND s.is_active = true
+ORDER BY s.role, s.last_name;
+
+-- ============================================================
+-- SEED DATA: Shifts
+-- ============================================================
+
+INSERT INTO shifts (name, start_time, end_time) VALUES
+('Morning (A)', '06:00', '14:00'),
+('Afternoon (B)', '14:00', '22:00'),
+('Night (C)', '22:00', '06:00');
+
+-- ============================================================
+-- SEED DATA: Departments
+-- ============================================================
+
+INSERT INTO departments (name, code, floor) VALUES
+('Cardiology', 'CARD', 2),
+('Neurology', 'NEUR', 2),
+('Orthopedics', 'ORTH', 1),
+('Pediatrics', 'PEDS', 3),
+('Oncology', 'ONCO', 3),
+('General Surgery', 'SURG', 2),
+('Maternity', 'MAT', 3),
+('Internal Medicine', 'INTM', 1),
+('Emergency', 'ER', 1),
+('ICU', 'ICU', 2),
+('Laboratory', 'LAB', 1),
+('Pharmacy', 'PHAR', 1),
+('Radiology', 'RAD', 1);
+
+-- ============================================================
+-- SEED DATA: Medicine Categories
+-- ============================================================
+
+INSERT INTO medicine_categories (name, description) VALUES
+('Antibiotic', 'Anti-infective agents'),
+('Analgesic', 'Pain relief medications'),
+('Antidiabetic', 'Blood sugar management'),
+('Antihypertensive', 'Blood pressure control'),
+('Anticoagulant', 'Blood thinning agents'),
+('Respiratory', 'Lung and airway medications'),
+('GI', 'Gastrointestinal medications'),
+('Sedative', 'Calming and sleep agents'),
+('Chemotherapy', 'Cancer treatment drugs'),
+('Cardiovascular', 'Heart medications'),
+('Hormone', 'Hormonal therapies'),
+('Vitamin/Supplement', 'Nutritional supplements');
+
+-- ============================================================
+-- SEED DATA: Insurance Providers
+-- ============================================================
+
+INSERT INTO insurance_providers (name, code, coverage_percentage) VALUES
+('NHIF', 'NHIF', 70.00),
+('Jubilee Insurance', 'JUB', 80.00),
+('AAR Healthcare', 'AAR', 85.00),
+('Britam', 'BRIT', 75.00),
+('Madison Insurance', 'MAD', 80.00),
+('CIC Insurance', 'CIC', 75.00),
+('UAP Old Mutual', 'UAP', 80.00);
+
+-- ============================================================
+-- FUNCTIONS & TRIGGERS
+-- ============================================================
+
+-- Auto-update updated_at timestamp
+CREATE OR REPLACE FUNCTION update_timestamp()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Apply to all tables with updated_at
+CREATE TRIGGER trg_patients_updated BEFORE UPDATE ON patients FOR EACH ROW EXECUTE FUNCTION update_timestamp();
+CREATE TRIGGER trg_staff_updated BEFORE UPDATE ON staff FOR EACH ROW EXECUTE FUNCTION update_timestamp();
+CREATE TRIGGER trg_admissions_updated BEFORE UPDATE ON admissions FOR EACH ROW EXECUTE FUNCTION update_timestamp();
+CREATE TRIGGER trg_beds_updated BEFORE UPDATE ON beds FOR EACH ROW EXECUTE FUNCTION update_timestamp();
+CREATE TRIGGER trg_invoices_updated BEFORE UPDATE ON invoices FOR EACH ROW EXECUTE FUNCTION update_timestamp();
+CREATE TRIGGER trg_medicines_updated BEFORE UPDATE ON medicines FOR EACH ROW EXECUTE FUNCTION update_timestamp();
+CREATE TRIGGER trg_departments_updated BEFORE UPDATE ON departments FOR EACH ROW EXECUTE FUNCTION update_timestamp();
+CREATE TRIGGER trg_wards_updated BEFORE UPDATE ON wards FOR EACH ROW EXECUTE FUNCTION update_timestamp();
+
+-- Auto-update bed status on admission/discharge
+CREATE OR REPLACE FUNCTION update_bed_on_admission()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.bed_id IS NOT NULL AND (TG_OP = 'INSERT' OR OLD.bed_id IS DISTINCT FROM NEW.bed_id) THEN
+        UPDATE beds SET status = 'Occupied' WHERE id = NEW.bed_id;
+        IF OLD.bed_id IS NOT NULL AND OLD.bed_id != NEW.bed_id THEN
+            UPDATE beds SET status = 'Available' WHERE id = OLD.bed_id;
+        END IF;
+    END IF;
+    IF NEW.status IN ('Discharged', 'Deceased') AND OLD.status NOT IN ('Discharged', 'Deceased') THEN
+        UPDATE beds SET status = 'Available' WHERE id = NEW.bed_id;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_admission_bed AFTER INSERT OR UPDATE ON admissions FOR EACH ROW EXECUTE FUNCTION update_bed_on_admission();
+
+-- Auto-update invoice status on payment
+CREATE OR REPLACE FUNCTION update_invoice_on_payment()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_total NUMERIC;
+    v_paid NUMERIC;
+BEGIN
+    SELECT total_amount INTO v_total FROM invoices WHERE id = NEW.invoice_id;
+    SELECT COALESCE(SUM(amount), 0) INTO v_paid FROM payments WHERE invoice_id = NEW.invoice_id;
+    
+    UPDATE invoices SET
+        paid_amount = v_paid,
+        status = CASE
+            WHEN v_paid >= v_total THEN 'Paid'
+            WHEN v_paid > 0 THEN 'Partial'
+            ELSE 'Unpaid'
+        END
+    WHERE id = NEW.invoice_id;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_payment_invoice AFTER INSERT ON payments FOR EACH ROW EXECUTE FUNCTION update_invoice_on_payment();
+
+-- Auto-update medicine stock on movement
+CREATE OR REPLACE FUNCTION update_stock_on_movement()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.movement_type IN ('IN', 'RETURN') THEN
+        UPDATE medicines SET stock_quantity = stock_quantity + NEW.quantity WHERE id = NEW.medicine_id;
+    ELSIF NEW.movement_type IN ('OUT', 'EXPIRED') THEN
+        UPDATE medicines SET stock_quantity = stock_quantity - NEW.quantity WHERE id = NEW.medicine_id;
+    ELSIF NEW.movement_type = 'ADJUSTMENT' THEN
+        UPDATE medicines SET stock_quantity = NEW.quantity WHERE id = NEW.medicine_id;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_stock_movement AFTER INSERT ON stock_movements FOR EACH ROW EXECUTE FUNCTION update_stock_on_movement();
+
+-- Generate sequential patient number
+CREATE OR REPLACE FUNCTION generate_patient_number()
+RETURNS TRIGGER AS $$
+DECLARE
+    seq_val INTEGER;
+BEGIN
+    SELECT COALESCE(MAX(CAST(SUBSTRING(patient_number FROM 4) AS INTEGER)), 0) + 1
+    INTO seq_val FROM patients;
+    NEW.patient_number = 'PT-' || LPAD(seq_val::TEXT, 6, '0');
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_patient_number BEFORE INSERT ON patients FOR EACH ROW WHEN (NEW.patient_number IS NULL) EXECUTE FUNCTION generate_patient_number();
+
+-- ============================================================
+-- PERMISSIONS (role-based access)
+-- ============================================================
+
+-- Create roles
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'medicore_admin') THEN
+        CREATE ROLE medicore_admin;
+    END IF;
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'medicore_doctor') THEN
+        CREATE ROLE medicore_doctor;
+    END IF;
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'medicore_nurse') THEN
+        CREATE ROLE medicore_nurse;
+    END IF;
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'medicore_billing') THEN
+        CREATE ROLE medicore_billing;
+    END IF;
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'medicore_readonly') THEN
+        CREATE ROLE medicore_readonly;
+    END IF;
+END $$;
+
+-- Admin: full access
+GRANT ALL ON ALL TABLES IN SCHEMA public TO medicore_admin;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO medicore_admin;
+
+-- Doctor: patients, admissions, appointments, labs, prescriptions
+GRANT SELECT, INSERT, UPDATE ON patients, admissions, appointments, vitals, lab_orders, prescriptions, prescription_items TO medicore_doctor;
+GRANT SELECT ON departments, wards, beds, staff, medicines, lab_test_types TO medicore_doctor;
+
+-- Nurse: vitals, admissions (update status), beds
+GRANT SELECT ON patients, admissions, appointments, departments, wards, staff TO medicore_nurse;
+GRANT SELECT, INSERT, UPDATE ON vitals TO medicore_nurse;
+GRANT UPDATE (status) ON admissions TO medicore_nurse;
+GRANT UPDATE (status) ON beds TO medicore_nurse;
+
+-- Billing: invoices, payments
+GRANT SELECT ON patients, admissions TO medicore_billing;
+GRANT SELECT, INSERT, UPDATE ON invoices, invoice_items, payments, insurance_claims TO medicore_billing;
+
+-- Readonly
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO medicore_readonly;
