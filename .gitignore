@@ -1,0 +1,33 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.coverage
+
+# Logs
+*.log
+
+# Databases and patient data
+*.sql
+*.dump
+*.backup
+*.sqlite3
+*.db
+uploads/
+media/
+backups/
+exports/
+
+# Editors and operating system
+.vscode/
+.idea/
+.DS_Store
